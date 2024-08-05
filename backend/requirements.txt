@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+sqlalchemy 
+psycopg2-binary
+python-jose
+passlib
+sentence-transformers==3.0.1
+hugchat
+langchain==0.1.8
+langchain-community==0.0.21
+langchain-core==0.1.24
+langchain-openai==0.0.6
+chromadb==0.3.29
+python-multipart
+pypdf

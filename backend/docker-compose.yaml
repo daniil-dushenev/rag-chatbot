@@ -1,0 +1,87 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:latest
+    build: ./db
+    env_file:
+      - .env
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+      LANG: en_US.UTF-8
+      LANGUAGE: en_US:en
+      LC_ALL: en_US.UTF-8
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - mynetwork
+
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend
+    ports:
+      - "${BACK_PORT}:${BACK_PORT}"
+    depends_on:
+      - postgres
+    environment:
+      CUDA_LAUNCH_BLOCKING: 1
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: "postgres"
+      DB_PORT: 5432
+      BACK_PORT: ${BACK_PORT}
+      VLLM_PORT: ${VLLM_PORT}
+      LANG: en_US.UTF-8
+      LANGUAGE: en_US:en
+      LC_ALL: en_US.UTF-8
+      HUGCHAT_LOGIN: ${HUGCHAT_LOGIN}
+      HUGCHAT_PASS: ${HUGCHAT_PASS}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    networks:
+      - mynetwork
+    volumes:
+      - data-volume:/app/data
+
+
+  streamlit:
+    build:
+      context: ../
+      dockerfile: frontend/Dockerfile
+    container_name: frontend
+    ports:
+      - "8501:8501"
+    environment:
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: "postgres"
+      DB_PORT: 5432
+      BACK_PORT: ${BACK_PORT}
+    depends_on:
+      - fastapi
+    networks:
+      - mynetwork
+    volumes:
+      - data-volume:/app/data
+
+volumes:
+  postgres_data:
+  data-volume:
+
+networks:
+  mynetwork:
+    driver: bridge
