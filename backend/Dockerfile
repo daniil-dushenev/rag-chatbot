@@ -17,6 +17,11 @@ WORKDIR /app
 # Копируем файл requirements.txt в контейнер по пути /app
 COPY requirements.txt .
 
+RUN apt-get install -y \
+    build-essential \
+    gcc \
+    g++ 
+
 # Обновляем pip и устанавливаем зависимости
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
@@ -25,11 +30,11 @@ RUN pip install --upgrade pip && \
 COPY . .
 
 # Порт приложения из аргументов
-ARG BACK_PORT=8000
+ARG BACK_PORT
 ENV BACK_PORT=${BACK_PORT}
 
 # Expose the port that the app runs on
 EXPOSE ${BACK_PORT}
 
 # Command to run the FastAPI application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$BACK_PORT"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $BACK_PORT"]
