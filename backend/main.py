@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Query, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,6 +25,14 @@ from typing import List
 from langchain.embeddings.base import Embeddings
 from chat_config import system_prompt, start_message, chunk_size, top_k, prompt_for_make_pre_answer
 
+import boto3
+from botocore.client import Config
+import uuid
+import asyncio
+import traceback
+
+
+
 # SQLAlchemy database URL
 DATABASE_URL = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@postgres:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 
@@ -35,6 +43,16 @@ Base.metadata.create_all(bind=engine)
 
 bert = load_bert()
 client = hugchat_client(login=os.getenv("HUGCHAT_LOGIN"), password=os.getenv("HUGCHAT_PASS"))
+
+
+s3 = boto3.client('s3',
+                  endpoint_url=os.getenv("S3_ENDPOINT"),  # Замените на ваш URL MinIO или S3
+                  aws_access_key_id=os.getenv("S3_ACCESS_KEY"),         # Ваш access key
+                  aws_secret_access_key=os.getenv("S3_SECRET_KEY"),  # Ваш secret key
+                  config=Config(signature_version='s3v4'),
+                  region_name='us-east-1')
+
+
 # FastAPI app instance
 app = FastAPI()
 
@@ -237,6 +255,32 @@ def delete_message(message_id: int, db: Session = Depends(get_db), current_user:
     db.commit()
     return {"detail": "Message deleted"}
 
+
+def create_message(
+    message: MessageCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Проверяем, существует ли пользователь, которому предназначено сообщение
+    to_user = db.query(User).filter(User.id == message.user_id).first()
+    if not to_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Создаем новое сообщение
+    db_message = Message(
+        text=message.text,
+        user_id=message.user_id,  # Устанавливаем ID текущего пользователя как отправителя
+        to_user_id=message.to_user_id  # Устанавливаем ID пользователя, которому предназначено сообщение
+    )
+
+    # Добавляем сообщение в базу данных
+    db.add(db_message)
+    db.commit()
+    db.refresh(db_message)
+    
+    return db_message
+
+
 class TextRequest(BaseModel):
     text: str
 
@@ -420,15 +464,90 @@ class FileRequest(BaseModel):
     chunk_size: int
 
 
-@app.post("/vectorStorageFromFiles")
-def get_vectorstore_from_files(request: FileRequest, current_user: User = Depends(get_current_user)):
-    files = request.files
-    chunk_size = request.chunk_size
-    document_chunks = []
+def create_bucket(bucket_name, s3):
+    try:
+        response = s3.create_bucket(Bucket=bucket_name)
+        print(f'Бакет {bucket_name} успешно создан.')
+    except s3.exceptions.BucketAlreadyOwnedByYou:
+        print(f'Бакет с именем {bucket_name} уже существует и принадлежит вам.')
+    except s3.exceptions.BucketAlreadyExists:
+        print(f'Бакет с именем {bucket_name} уже существует.')
+    except Exception as e:
+        print(f'Ошибка при создании бакета: {e}')
 
+
+def save_file2bucket(bucket_name, file_path, object_name, s3):
+    try:
+        s3.upload_file(file_path, bucket_name, object_name)
+        print(f'Файл {file_path} успешно загружен в бакет {bucket_name} под именем {object_name}.')
+    except Exception as e:
+        print(f'Ошибка при загрузке файла: {e}')
+
+
+UPLOAD_DIR = 'data'
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.post("/upload_pdf/")
+async def upload_pdf(file: UploadFile = File(...)):
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    file_location = os.path.join(UPLOAD_DIR, file.filename)
+    
+    with open(file_location, "wb") as f:
+        content = await file.read()
+        f.write(content)
+    
+    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    return {"path": file_path, 'name': file.filename}
+
+@app.delete("/delete_pdf/{filename}")
+async def delete_pdf(filename: str):
+    file_location = os.path.join(UPLOAD_DIR, filename)
+    
+    if os.path.isfile(file_location):
+        os.remove(file_location)
+        return {"message": f"File '{filename}' has been deleted."}
+    else:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+
+def load_vec_storage_from_s3(vec_name):
+    local_path = f"./chroma/{vec_name}"
+    vec_storage = Chroma(persist_directory=local_path, embedding_function=CustomEmbeddings())
+    return vec_storage
+
+
+def create_vec_db(vec_name, source, is_public, db: Session):
+    db_vec_db = VecDb(
+        name=vec_name,
+        source=source,
+        is_public=is_public
+    )
+    db.add(db_vec_db)
+    db.commit()
+    db.refresh(db_vec_db)
+    return db_vec_db
+
+
+@app.post("/vectorStorageFromFiles")
+async def get_vectorstore_from_files(
+    vec_name: str = Query(..., description="Name of the vector storage"),
+    files: List[UploadFile] = File(...),
+    chunk_size: int = Query(2048, description="Chunk size for text splitting"),
+    is_public: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+    ):
+    document_chunks = []
+    create_bucket(vec_name, s3)
     for file in files:
-        loader = PyPDFLoader(file)
+        file = await upload_pdf(file)
+
+        save_file2bucket(vec_name, file["path"], file["name"], s3)
+
+        loader = PyPDFLoader(file['path'])
         document = loader.load()
+        await delete_pdf(file['name'])
+
 
         # собираем аббревиатуры из текста и меняем их на расшифровки
         abbreviation_definitions = get_abbreviation_definitions(document)
@@ -447,10 +566,20 @@ def get_vectorstore_from_files(request: FileRequest, current_user: User = Depend
         print(chunk)
     
     embeddings = CustomEmbeddings()
-    vector_storage = Chroma.from_documents(document_chunks, embeddings)
-    vec_storages.append(vector_storage)
-    ind = len(vec_storages) - 1
-    return {"index": ind}
+    vector_storage = Chroma.from_documents(document_chunks, embeddings, persist_directory=f"./chroma/{vec_name}")
+    vector_storage.persist()
+
+    vec_storages.append(vec_name)
+    print(vec_storages)
+    create_vec_db(vec_name, f"./chroma/{vec_name}", is_public, db)
+    return {"response": "Ok"}
+
+
+@app.get('/getVectorStoresList')
+def getVectorStoresList(current_user: User = Depends(auth)):
+    return {"answer": vec_storages}
+
+
 
 
 def get_fake_answer(query):
@@ -464,8 +593,7 @@ def get_fake_answer(query):
 
 def get_relevant_information(user_query, chat_history, vec_storage_ind):
     """Retrieve relevant information from vector store based on user query."""
-    vector_store =  vec_storages[vec_storage_ind]
-
+    vector_store = load_vec_storage_from_s3(vec_storage_ind)
     history2prompt = ""
     for message in chat_history:
         message_type = "assistant" if isinstance(message, AIMessage) else "user"
@@ -483,6 +611,7 @@ def get_relevant_information(user_query, chat_history, vec_storage_ind):
         return '\n\n'.join([str(doc) for doc in result])
     else:
         return None
+
 
 def merge_consecutive_messages(messages):
     if not messages:
@@ -550,35 +679,192 @@ def to_langchain_templates(messages):
     return new_messages
 
 
+
 class ChatMessage(BaseModel):
     role: str
     content: str
 
 class GetAnswerRequest(BaseModel):
     user_input: str
-    chat_history: List[ChatMessage]
-    vec_storage_ind: int
+    username: str
+    chat_id: int
 
-@app.get("/get_response")
-def get_response(request: GetAnswerRequest, current_user: User = Depends(get_current_user)):
-    user_input = request.user_input
-    chat_history = request.chat_history
-    vec_storage_ind = request.vec_storage_ind
 
-    chat_history = to_langchain_templates(chat_history)
+def get_messages_by_chat_id(db: Session, chat_id: int):
+    """
+    Получение всех сообщений по chat_id.
+
+    :param db: Сессия базы данных.
+    :param chat_id: Идентификатор чата.
+    :return: Список сообщений в чате.
+    """
+    return (
+        db.query(Message)
+        .join(MessageChat, Message.id == MessageChat.message_id)
+        .filter(MessageChat.chat_id == chat_id)
+        .order_by(Message.created_at)  # Сортировка по времени создания
+        .all()
+    )
+
+def get_messages(chat_id: int, db: Session):
+    messages = get_messages_by_chat_id(db, chat_id)
+
+    messages_list = []
+
+    for message in messages:
+        if message.user_id == 0: 
+            mes = {"role": "assistant", "content": message.text}
+        else:
+            mes = {"role": "user", "content": message.text}
+        messages_list.append(mes)
+
+    return messages_list
+
+def create_message_chat(db: Session, chat_id: int, message_id: int):
+    message_chat = MessageChat(chat_id=chat_id, message_id=message_id)
+    db_message_chat = MessageChat(
+        chat_id=message_chat.chat_id,
+        message_id=message_chat.message_id
+    )
+    db.add(db_message_chat)
+    db.commit()
+    db.refresh(db_message_chat)
+    return db_message_chat
+
+
+def add_new_message(username: str, text: str, to_assistant: bool, chat_id: int, db: Session):
+
+    # Получаем идентификатор пользователя по username
+    user_id = db.query(User).filter(User.username == username).first().id
     
-    context = get_relevant_information(user_input, chat_history, vec_storage_ind)
-    retriever = vec_storages[vec_storage_ind].as_retriever()
-    conversation_rag_chain = get_conversational_rag_chain(retriever)
-    inv_response = conversation_rag_chain.invoke({
-        "chat_history": chat_history,
-        "context": context,
-        "input": user_input
-    })
-    response = inv_response['answer']
+    if to_assistant:
+        new_message = Message(text=text, user_id=user_id, to_user_id = 0)
+    else:
+        new_message = Message(text=text, user_id=0, to_user_id = user_id)
+    mes = create_message(new_message, db=db)
+    create_message_chat(db, chat_id, mes.id)
 
-    return {"response": response}
 
+
+def create_task(db: Session, task_id: str, result: str, value: str):
+    new_task = Task(task_id=task_id, result=result, value=value)
+    try:
+        db.add(new_task)
+        db.commit()
+        db.refresh(new_task)
+    except IntegrityError:
+        db.rollback()
+        raise ValueError("Task with this task_id already exists")
+    return new_task
+
+# Функция для получения записи по task_id
+def get_result_and_value_by_task_id(db: Session, task_id: str):
+    task = db.query(Task).filter(Task.task_id == task_id).first()
+    if task:
+        return task.result, task.value
+    return None, None
+
+
+def update_task_result_and_value(db: Session, task_id: str, new_result: str, new_value: str):
+    task = db.query(Task).filter(Task.task_id == task_id).first()
+    if task:
+        task.result = new_result
+        task.value = new_value
+        db.commit()
+        db.refresh(task)
+        return task
+    return None
+
+
+def get_username_and_vecname_by_chat_id(db: Session, chat_id: int):
+    """
+    Получение username и vec_name по chat_id.
+
+    :param db: Сессия базы данных.
+    :param chat_id: Идентификатор чата.
+    :return: Словарь с username и vec_name.
+    """
+    result = (
+        db.query(User.username, VecDb.name)
+        .join(Chat, Chat.user_id == User.id)
+        .join(VecDb, Chat.vec_db_id == VecDb.id)
+        .filter(Chat.id == chat_id)
+        .first()
+    )
+    
+    if result:
+        return result.username, result.name
+    return None
+
+async def get_llm_ans(task_id: str, user_input: str, chat_id: int, db: Session):
+    try:
+        chat_history = await asyncio.to_thread(get_messages, chat_id, db)
+        chat_history = to_langchain_templates(chat_history)
+
+        username, vec_storage_ind = await asyncio.to_thread(get_username_and_vecname_by_chat_id, db, chat_id)
+
+        await asyncio.to_thread(add_new_message, username, user_input, True, chat_id, db)
+        
+        # Используем asyncio.to_thread для вызова блокирующих операций
+        context = await asyncio.to_thread(get_relevant_information, user_input, chat_history, vec_storage_ind)
+        vector_store = load_vec_storage_from_s3(vec_storage_ind)
+        retriever = await asyncio.to_thread(lambda: vector_store.as_retriever())
+        conversation_rag_chain = await asyncio.to_thread(lambda: get_conversational_rag_chain(retriever))
+
+        inv_response = await asyncio.to_thread(lambda: conversation_rag_chain.invoke({
+            "chat_history": chat_history,
+            "context": context,
+            "input": user_input
+        }))
+        response = inv_response['answer']
+
+        await asyncio.to_thread(add_new_message, username, response, False, chat_id, db)
+
+        update_task_result_and_value(db, task_id, "completed", response)
+
+
+    except Exception as e:
+        # Если возникла ошибка, сохраняем ее в статус задачи
+        tb_str = traceback.format_exception(e)
+        error_message = ''.join(tb_str)
+        update_task_result_and_value(db, task_id, "failed", error_message)
+
+
+@app.post("/get_response")
+async def get_response(request: GetAnswerRequest, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task_id = str(uuid.uuid4())
+
+    # Сохраняем начальный статус задачи
+    create_task(db, task_id, "in_progress", None)
+
+    # Запускаем обработку задачи в фоне
+    background_tasks.add_task(get_llm_ans, task_id, request.user_input, request.chat_id, db)
+    
+    return {"task_id": task_id}
+
+
+@app.get("/task_status/{task_id}")
+async def get_task_status(task_id: str, db: Session = Depends(get_db)):
+    status, value = get_result_and_value_by_task_id(db, task_id)
+    if status == "failed":
+        raise HTTPException(status_code=500, detail=f"Task failed: {value}")
+    if status is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": status, "response": value}
+
+
+@app.post("/create_chat")
+def create_chat(username: str, vec_name: str, db: Session = Depends(get_db)):
+    vec_db_id = db.query(VecDb).filter(VecDb.name == vec_name).first().id
+    user_id = db.query(User).filter(User.id == user_id).first().id
+    db_chat = Chat(
+        vec_db_id=vec_db_id,
+        user_id=user_id
+    )
+    db.add(db_chat)
+    db.commit()
+    db.refresh(db_chat)
+    return {"chat_id": db_chat.id}
 
 
 if __name__ == "__main__":

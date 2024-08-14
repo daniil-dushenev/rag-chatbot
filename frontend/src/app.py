@@ -4,45 +4,84 @@ import requests
 import atexit
 from typing import List
 from chat_config import start_message, chunk_size, top_k
+import time
 
 
 fastapi_host = f"http://fastapi:{os.getenv('BACK_PORT')}"
 
 
-def get_vectorstore_from_files(file_path, chunk_size, access_token):
-    print(file_path)
+def get_vectorstore_from_files(name, files, chunk_size, access_token):
+    print(files)
+    files = [("files", file) for file in files]
     headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {access_token}"
     }
-    response = requests.post(f"{fastapi_host}/vectorStorageFromFiles", json={"files": file_path, "chunk_size": chunk_size}, headers=headers)
+    response = requests.post(f"{fastapi_host}/vectorStorageFromFiles", params={"vec_name": name, "chunk_size": chunk_size}, 
+                             headers=headers, files=files)
     if response.status_code == 200:
-        ind = response.json()['index']
+        ind = response.json()['response']
     else:
-        raise Exception(f"Failed to get embedding: {response.status_code} {response.text}")
+        raise Exception(f"Failed to make vectore storage: {response.status_code} {response.text}")
     return ind
 
 
-
-def get_response(user_input, vec_storage_ind):
-    if 'chat_history' in st.session_state:
-        chat_history = st.session_state.chat_history
+def create_task(user_input, chat_id):
     token = st.session_state.access_token
+    chat_id = st.session_state.chat_id
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
-    response = requests.get(f"{fastapi_host}/get_response", json={"user_input": user_input, "chat_history": chat_history, 'vec_storage_ind': vec_storage_ind},
-                            headers=headers
-                            )
+    response = requests.post(
+        f"{fastapi_host}/get_response",
+        json={"user_input": user_input, 'chat_id': chat_id},
+        headers=headers
+    )
+
     if response.status_code == 200:
-        response = response.json()['response']
+        task_id = response.json()['task_id']
+        return task_id
     else:
-        raise Exception(f"Failed to get embedding: {response.status_code} {response.text}")
-        
-    return response
+        raise Exception(f"Failed to create task: {response.status_code} {response.text}")
+    
+
+def get_task_status(task_id):
+    token = st.session_state.access_token
+
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+
+    response = requests.get(
+        f"{fastapi_host}/task_status/{task_id}",
+        headers=headers
+    )
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(f"Failed to get task status: {response.status_code} {response.text}")
+
+
+
+def get_response(user_input, chat_id):
+    task_id = create_task(user_input, chat_id)
+
+    # Ожидаем завершения задачи
+    while True:
+        status = get_task_status(task_id)
+        if status['status'] == 'completed':
+            return status['response']
+        elif status['status'] == 'in_progress':
+            print("Task is still in progress. Waiting...")
+            time.sleep(2)  # Подождите немного перед следующей проверкой
+        elif status['status'] == 'failed':
+            raise Exception(status['status'])
+        else:
+            raise Exception("Task failed or status is unknown")
+
 
 
 DATA_DIR = "/app/data"
@@ -81,6 +120,25 @@ def cleanup_data_directory():
 # Register cleanup function to be called on exit
 atexit.register(cleanup_data_directory)
 
+
+def create_new_chat(username, vec_name):
+    token = st.session_state.access_token
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(
+        f"{fastapi_host}/create_chat",
+        json={"username": username, 'vec_name': vec_name},
+        headers=headers
+    )
+
+    if response.status_code == 200:
+        return response.json()['chat_id']
+    else:
+        raise Exception(f"Failed to create task: {response.status_code} {response.text}")
+
 # Основная часть страницы входа
 def login_page():
     st.title("Login")
@@ -103,6 +161,7 @@ def login_page():
             if response.status_code == 200:
                 access_token = response.json()["access_token"]
                 st.session_state.access_token = access_token
+                st.session_state.username = username
                 st.success("Logged in successfully!")
                 return access_token  # Возврат значения True для перехода на страницу чата
             else:
@@ -128,14 +187,17 @@ def chat_page(access_token):
             st.session_state.chat_history = [
                 {"role": "assistant", "content": start_message}
             ]
+            
 
         if "vector_store" not in st.session_state:
             file_path = save_uploaded_files(document_files)
             st.session_state.vector_store = get_vectorstore_from_files(file_path, chunk_size, access_token)
 
+        chat_id = create_new_chat(st.session_state.username, st.session_state.vector_store.name)
+
         user_query = st.chat_input("Type your message ✍")
         if user_query is not None and user_query != "":
-            response = get_response(user_query, st.session_state.vector_store)
+            response = get_response(user_query, chat_id)
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             st.session_state.chat_history.append({"role": "assistant", "content": response})
 
