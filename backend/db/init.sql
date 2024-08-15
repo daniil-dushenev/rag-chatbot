@@ -22,7 +22,7 @@ CREATE INDEX idx_messages_user_id ON messages (user_id);
 ALTER TABLE users ALTER COLUMN id DROP DEFAULT;
 
 -- Вставка записи с id = 0
-INSERT INTO users (id, username) VALUES (0, 'assistant')
+INSERT INTO users (id, username, password_hash, email) VALUES (0, 'assistant', 'pass', 'email')
 ON CONFLICT (id) DO NOTHING;
 
 
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     result TEXT,
     value TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
+);
 
 -- Восстановление автоинкрементного свойства
 ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval('users_id_seq');

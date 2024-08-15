@@ -576,7 +576,7 @@ async def get_vectorstore_from_files(
 
 
 @app.get('/getVectorStoresList')
-def getVectorStoresList(current_user: User = Depends(auth)):
+def getVectorStoresList(current_user: User = Depends(get_current_user)):
     return {"answer": vec_storages}
 
 
@@ -672,10 +672,10 @@ def get_conversational_rag_chain(retriever):
 def to_langchain_templates(messages):
     new_messages = []
     for mes in messages:
-        if mes.role == "assistant":
-            new_messages.append(AIMessage(content=mes.content))
+        if mes['role'] == "assistant":
+            new_messages.append(AIMessage(content=mes['content']))
         else:
-            new_messages.append(HumanMessage(content=mes.content))
+            new_messages.append(HumanMessage(content=mes['content']))
     return new_messages
 
 
@@ -686,7 +686,6 @@ class ChatMessage(BaseModel):
 
 class GetAnswerRequest(BaseModel):
     user_input: str
-    username: str
     chat_id: int
 
 
@@ -856,7 +855,7 @@ async def get_task_status(task_id: str, db: Session = Depends(get_db)):
 @app.post("/create_chat")
 def create_chat(username: str, vec_name: str, db: Session = Depends(get_db)):
     vec_db_id = db.query(VecDb).filter(VecDb.name == vec_name).first().id
-    user_id = db.query(User).filter(User.id == user_id).first().id
+    user_id = db.query(User).filter(User.username == username).first().id
     db_chat = Chat(
         vec_db_id=vec_db_id,
         user_id=user_id

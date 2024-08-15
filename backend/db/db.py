@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Text, TIMESTAMP, func
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Text, TIMESTAMP, func, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from pydantic import BaseModel
@@ -13,7 +13,7 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     email = Column(String(100), nullable=False, unique=True, index=True)
     
-    messages = relationship("Message", back_populates="owner")
+    messages = relationship("Message", foreign_keys="Message.user_id", back_populates="owner")
     db_user = relationship("DbUser", back_populates="user")
     chats = relationship("Chat", back_populates="user")
 
@@ -25,7 +25,9 @@ class Message(Base):
     to_user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
     
-    owner = relationship("User", back_populates="messages")
+    owner = relationship("User", foreign_keys=[user_id], back_populates="messages")
+    recipient = relationship("User", foreign_keys=[to_user_id])
+
 
 class Task(Base):
     __tablename__ = 'tasks'
