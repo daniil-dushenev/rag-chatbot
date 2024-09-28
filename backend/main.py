@@ -85,7 +85,7 @@ def get_db():
 
 
 # Secret key for encoding/decoding JWT
-SECRET_KEY = "xologie"
+SECRET_KEY = os.getenv("JWT_SECRET")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -146,6 +146,7 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
     access_token = create_access_token(data={"sub": user.username}, expires_delta=access_token_expires)
     return {"access_token": access_token, "token_type": "bearer"}
 
+
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=401,
@@ -177,6 +178,35 @@ def me(request: meRequest, db: Session = Depends(get_db)):
         "username": user.username,
         "email": user.email
     }
+
+
+class UserUpdate(BaseModel):
+    username: str = None
+    password: str = None
+    email: str = None
+
+
+@app.put("/users/{username}")
+def update_user(username: str, user_update: UserUpdate, db: Session = Depends(get_db)):
+    # Поиск пользователя по username
+    user = db.query(User).filter(User.username == username).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Обновление данных пользователя
+    if user_update.username:
+        user.username = user_update.username
+    if user_update.password:
+        user.password_hash = pwd_context.hash(user_update.password)
+    if user_update.email:
+        user.email = user_update.email
+
+    # Сохранение изменений
+    db.commit()
+    db.refresh(user)
+
+    return {"message": "User updated successfully", "user": user.username}
 
 
 # Protected route example
@@ -799,6 +829,41 @@ def create_chat(username: str, vec_name: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_chat)
     return {"chat_id": db_chat.id}
+
+
+@app.get("/chats")
+def get_chats_by_user(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user.id
+
+    # Поиск всех чатов пользователя
+    chats = db.query(Chat).filter(Chat.user_id == user_id).all()
+
+    if not chats:
+        raise HTTPException(status_code=404, detail="No chats found for this user")
+
+    return chats
+
+
+class MessagesRequest(BaseModel):
+    chat_id: int
+
+@app.get("/messages")
+def get_messages_by_user(request: MessagesRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Основной запрос для получения сообщений для текущего пользователя
+    query = db.query(Message).join(MessageChat).join(Chat).filter(Chat.user_id == current_user.id)
+    
+    # Если передан `chat_id`, фильтруем по конкретному чату
+    if request.chat_id:
+        query = query.filter(MessageChat.chat_id == request.chat_id)
+
+    # Получаем все сообщения
+    messages = query.order_by(Message.created_at.desc()).all()
+
+    # Если сообщений нет, возвращаем ошибку 404
+    if not messages:
+        raise HTTPException(status_code=404, detail="No messages found for the user")
+
+    return messages
 
 
 if __name__ == "__main__":
