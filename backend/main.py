@@ -41,7 +41,10 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
+# подгружаем модель для реализации RAG-системы
 bert = load_bert()
+
+# подгружаем объект клиента чатбота, внешний апи сервис
 client = hugchat_client(login=os.getenv("HUGCHAT_LOGIN"), password=os.getenv("HUGCHAT_PASS"))
 
 
@@ -161,6 +164,21 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     return user
 
+
+class meRequest(BaseModel):
+    token: str
+
+
+@app.get("/me")
+def me(request: meRequest, db: Session = Depends(get_db)):
+    token = request.token
+    user = get_current_user(token=token, db=db)
+    return {
+        "username": user.username,
+        "email": user.email
+    }
+
+
 # Protected route example
 @app.get("/protected")
 def protected_route(current_user: User = Depends(get_current_user)):
@@ -171,89 +189,6 @@ def protected_route(current_user: User = Depends(get_current_user)):
         )
     return {"message": f"Hello, {current_user.username}!"}
 
-
-
-# CRUD operations for User
-@app.post("/users/", response_model=UserInDB)
-def create_user(user: UserCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    try:
-        db_user = User(username=user.username, account_id=user.account_id)
-        db.add(db_user)
-        db.commit()
-        db.refresh(db_user)
-        return db_user
-    except IntegrityError:
-        raise HTTPException(status_code=400, detail="Username or email already registered")
-
-
-@app.get("/users/{user_id}", response_model=UserInDB)
-def read_user(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return db_user
-
-
-@app.put("/users/{user_id}", response_model=UserInDB)
-def update_user(user_id: int, user: UserUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    for key, value in user.dict(exclude_unset=True).items():
-        setattr(db_user, key, value)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-
-@app.delete("/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    db.delete(db_user)
-    db.commit()
-    return {"detail": "User deleted"}
-
-
-# CRUD operations for Message
-@app.post("/messages/", response_model=MessageInDB)
-def create_message(message: MessageCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_message = Message(user_id=message.user_id, text=message.text)
-    db.add(db_message)
-    db.commit()
-    db.refresh(db_message)
-    return db_message
-
-
-@app.get("/messages/{message_id}", response_model=MessageInDB)
-def read_message(message_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_message = db.query(Message).filter(Message.id == message_id).first()
-    if db_message is None:
-        raise HTTPException(status_code=404, detail="Message not found")
-    return db_message
-
-
-@app.put("/messages/{message_id}", response_model=MessageInDB)
-def update_message(message_id: int, message: MessageUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_message = db.query(Message).filter(Message.id == message_id).first()
-    if db_message is None:
-        raise HTTPException(status_code=404, detail="Message not found")
-    for key, value in message.dict(exclude_unset=True).items():
-        setattr(db_message, key, value)
-    db.commit()
-    db.refresh(db_message)
-    return db_message
-
-
-@app.delete("/messages/{message_id}")
-def delete_message(message_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_message = db.query(Message).filter(Message.id == message_id).first()
-    if db_message is None:
-        raise HTTPException(status_code=404, detail="Message not found")
-    db.delete(db_message)
-    db.commit()
-    return {"detail": "Message deleted"}
 
 
 def create_message(
@@ -292,19 +227,19 @@ class TextsRequest(BaseModel):
 class MessagesRequest(BaseModel):
     messages: List[Dict]
 
-@app.post("/embedding")
+
 def make_embedding(request: TextRequest, current_user: User = Depends(get_current_user)):
     text = request.text
     embs = get_embeddings([text], bert)
     return {"embedding": embs[0]}
 
-@app.post("/embeddings")
+
 def make_embeddings(request: TextsRequest, current_user: User = Depends(get_current_user)):
     texts = request.texts
     embs = get_embeddings(texts, bert)
     return {"embeddings": embs}
 
-@app.post("/llm_answer")
+
 def make_llm_answer(request: MessagesRequest, current_user: User = Depends(get_current_user)):
     messages = request.messages
     model_answer = llm_answer(messages, client)
