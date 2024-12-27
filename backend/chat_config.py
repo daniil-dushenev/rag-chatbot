@@ -9,6 +9,8 @@ prompt_for_make_pre_answer = """Ты - помощник для RAG-систем�
 
 """
 
+noname_chat = "Без названия"
+
 chunk_size = 2048
 
-top_k = 15
+top_k = 5

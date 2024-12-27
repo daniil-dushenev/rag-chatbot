@@ -11,7 +11,7 @@ from typing import List, Optional, Dict, Union
 from db.db import *
 import os
 import uvicorn
-from ml.models import load_bert, get_embeddings, llm_answer, hugchat_client
+from ml.models import load_bert, get_embeddings, llm_answer, get_client
 import re
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -23,7 +23,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.document_loaders.pdf import PyPDFLoader
 from typing import List
 from langchain.embeddings.base import Embeddings
-from chat_config import system_prompt, start_message, chunk_size, top_k, prompt_for_make_pre_answer
+from chat_config import system_prompt, start_message, chunk_size, top_k, prompt_for_make_pre_answer, noname_chat
 
 import boto3
 from botocore.client import Config
@@ -45,8 +45,7 @@ Base.metadata.create_all(bind=engine)
 bert = load_bert()
 
 # подгружаем объект клиента чатбота, внешний апи сервис
-client = hugchat_client(login=os.getenv("HUGCHAT_LOGIN"), password=os.getenv("HUGCHAT_PASS"))
-
+client = get_client(token=os.getenv("HF_TOKEN"))
 
 s3 = boto3.client('s3',
                   endpoint_url=os.getenv("S3_ENDPOINT"),  # Замените на ваш URL MinIO или S3
@@ -62,7 +61,12 @@ app = FastAPI()
 
 origins = [
     "http://localhost",
-    "http://localhost:8501"
+    "http://localhost:8501",
+    "http://localhost:9000",
+    "https://salut.uno",
+    "https://salut.ltd",
+    "https://salut-ai.store",
+    "*"
 ]
 
 app.add_middleware(
@@ -87,7 +91,7 @@ def get_db():
 # Secret key for encoding/decoding JWT
 SECRET_KEY = os.getenv("JWT_SECRET")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 90
 
 
 # Password hashing context
@@ -166,13 +170,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 
-class meRequest(BaseModel):
-    token: str
-
 
 @app.get("/me")
-def me(request: meRequest, db: Session = Depends(get_db)):
-    token = request.token
+def me(token: str, db: Session = Depends(get_db)):
     user = get_current_user(token=token, db=db)
     return {
         "username": user.username,
@@ -481,7 +481,7 @@ def load_vec_storage_from_s3(vec_name):
     return vec_storage
 
 
-def create_vec_db(vec_name, source, is_public, db: Session):
+def create_vec_db(vec_name, source, is_public, user_id, db: Session):
     db_vec_db = VecDb(
         name=vec_name,
         source=source,
@@ -490,6 +490,15 @@ def create_vec_db(vec_name, source, is_public, db: Session):
     db.add(db_vec_db)
     db.commit()
     db.refresh(db_vec_db)
+
+    db_user_db = DbUser(
+        vec_db_id=db_vec_db.id,
+        user_id=user_id,
+        is_owner=True
+    )
+    db.add(db_user_db)
+    db.commit()
+    db.refresh(db_user_db)
     return db_vec_db
 
 
@@ -534,15 +543,22 @@ async def get_vectorstore_from_files(
     vector_storage = Chroma.from_documents(document_chunks, embeddings, persist_directory=f"./chroma/{vec_name}")
     vector_storage.persist()
 
-    vec_storages.append(vec_name)
-    print(vec_storages)
-    create_vec_db(vec_name, f"./chroma/{vec_name}", is_public, db)
+    create_vec_db(vec_name, f"./chroma/{vec_name}", is_public, current_user.id, db)
     return {"response": "Ok"}
 
 
 @app.get('/getVectorStoresList')
-def getVectorStoresList(current_user: User = Depends(get_current_user)):
-    return {"answer": vec_storages}
+def getVectorStoresList(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+
+    vecdb_names = (
+        db.query(VecDb.name)
+        .join(DbUser, DbUser.vec_db_id == VecDb.id)
+        .filter(User.id == current_user.id)
+        .all()
+    )
+    
+    # Extracting names from the result
+    return [name for (name,) in vecdb_names]
 
 
 
@@ -565,17 +581,15 @@ def get_relevant_information(user_query, chat_history, vec_storage_ind):
         text = message.content
         history2prompt += f"{message_type}:\n{text}\n\n"
     
-    history2prompt += "user:\n"    
-    llm_query = get_fake_answer(history2prompt + user_query)
-    print("LLM query")
-    print(llm_query)
-    query2vecstore = user_query + '\n' + llm_query
+    # history2prompt += "user:\n"    
+    # llm_query = get_fake_answer(history2prompt + user_query)
+    # print("LLM query")
+    # print(llm_query)
+    # query2vecstore = user_query + '\n' + llm_query
+    query2vecstore = user_query
     result = vector_store.similarity_search(query2vecstore, k=top_k)
     print(result)
-    if result:
-        return '\n\n'.join([str(doc) for doc in result])
-    else:
-        return None
+    return result
 
 
 def merge_consecutive_messages(messages):
@@ -621,18 +635,18 @@ def custom_llm(prompt):
 
 
 
-def get_conversational_rag_chain(retriever):
+def get_conversational_rag_chain():
     """Create a conversational RAG chain using the given context retriever chain."""
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt + """
             {context}
             """),
         MessagesPlaceholder(variable_name="chat_history"),
-        ("user", "{input}")
+        ("user", "Теперь ответь на этот вопрос:\n{input}")
     ])
 
     stuff_documents_chain = create_stuff_documents_chain(custom_llm, prompt)
-    return create_retrieval_chain(retriever, stuff_documents_chain)
+    return stuff_documents_chain
 
 def to_langchain_templates(messages):
     new_messages = []
@@ -760,12 +774,37 @@ def get_username_and_vecname_by_chat_id(db: Session, chat_id: int):
         return result.username, result.name
     return None
 
-async def get_llm_ans(task_id: str, user_input: str, chat_id: int, db: Session):
+
+def make_name_for_chat(user_input, vec_name, chat_id, db: Session):
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if chat.name == noname_chat:
+        prompt = f"""
+        Мне нужно придумать название для чата, которое говорит о том, что в нем происходит. Я дам тебе текст 
+        первого запроса пользователя и название базы знаний, которое он использует. Придумай короткое название чата, напиши только название
+        База знаний: {vec_name}
+        Запрос пользователя: {user_input}
+        Ответ:
+        """
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+        name = llm_answer(messages, client)
+
+        chat = db.query(Chat).filter(Chat.id == chat_id).first()
+        chat.name = name
+        db.commit()
+        db.refresh(chat)
+    
+
+
+async def get_llm_ans(user_input: str, chat_id: int, db: Session):
     try:
         chat_history = await asyncio.to_thread(get_messages, chat_id, db)
         chat_history = to_langchain_templates(chat_history)
 
         username, vec_storage_ind = await asyncio.to_thread(get_username_and_vecname_by_chat_id, db, chat_id)
+
+        await asyncio.to_thread(make_name_for_chat, user_input, vec_storage_ind, chat_id, db)
 
         await asyncio.to_thread(add_new_message, username, user_input, True, chat_id, db)
         
@@ -773,38 +812,43 @@ async def get_llm_ans(task_id: str, user_input: str, chat_id: int, db: Session):
         context = await asyncio.to_thread(get_relevant_information, user_input, chat_history, vec_storage_ind)
         vector_store = load_vec_storage_from_s3(vec_storage_ind)
         retriever = await asyncio.to_thread(lambda: vector_store.as_retriever())
-        conversation_rag_chain = await asyncio.to_thread(lambda: get_conversational_rag_chain(retriever))
+        conversation_rag_chain = await asyncio.to_thread(lambda: get_conversational_rag_chain())
 
         inv_response = await asyncio.to_thread(lambda: conversation_rag_chain.invoke({
             "chat_history": chat_history,
             "context": context,
             "input": user_input
         }))
-        response = inv_response['answer']
+        response = inv_response
 
         await asyncio.to_thread(add_new_message, username, response, False, chat_id, db)
 
-        update_task_result_and_value(db, task_id, "completed", response)
+        # update_task_result_and_value(db, task_id, "completed", response)
+        return response
 
 
     except Exception as e:
         # Если возникла ошибка, сохраняем ее в статус задачи
         tb_str = traceback.format_exception(e)
         error_message = ''.join(tb_str)
-        update_task_result_and_value(db, task_id, "failed", error_message)
+        # update_task_result_and_value(db, task_id, "failed", error_message)
+        print(error_message)
+        raise e
+        
 
 
 @app.post("/get_response")
 async def get_response(request: GetAnswerRequest, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    task_id = str(uuid.uuid4())
+    # task_id = str(uuid.uuid4())
 
-    # Сохраняем начальный статус задачи
-    create_task(db, task_id, "in_progress", None)
+    # # Сохраняем начальный статус задачи
+    # create_task(db, task_id, "in_progress", None)
 
-    # Запускаем обработку задачи в фоне
-    background_tasks.add_task(get_llm_ans, task_id, request.user_input, request.chat_id, db)
+    # # Запускаем обработку задачи в фоне
+    # background_tasks.add_task(get_llm_ans, task_id, request.user_input, request.chat_id, db)
+    answer = await get_llm_ans(request.user_input, request.chat_id, db)
     
-    return {"task_id": task_id}
+    return answer
 
 
 @app.get("/task_status/{task_id}")
@@ -818,17 +862,40 @@ async def get_task_status(task_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/create_chat")
-def create_chat(username: str, vec_name: str, db: Session = Depends(get_db)):
+def create_chat(vec_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    username = current_user.username
     vec_db_id = db.query(VecDb).filter(VecDb.name == vec_name).first().id
     user_id = db.query(User).filter(User.username == username).first().id
     db_chat = Chat(
         vec_db_id=vec_db_id,
-        user_id=user_id
+        user_id=user_id,
+        name=noname_chat
     )
     db.add(db_chat)
     db.commit()
     db.refresh(db_chat)
     return {"chat_id": db_chat.id}
+
+
+
+
+@app.get("/messages")
+def get_messages_by_user(chat_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Основной запрос для получения сообщений для текущего пользователя
+    query = db.query(Message).join(MessageChat).join(Chat).filter(Chat.user_id == current_user.id)
+    
+    # Если передан `chat_id`, фильтруем по конкретному чату
+    query = query.filter(MessageChat.chat_id == chat_id)
+
+    # Получаем все сообщения
+    messages = query.order_by(Message.created_at.asc()).all()
+
+    if not messages:
+        return []
+
+    return messages
+
+
 
 
 @app.get("/chats")
@@ -839,31 +906,13 @@ def get_chats_by_user(current_user: User = Depends(get_current_user), db: Sessio
     chats = db.query(Chat).filter(Chat.user_id == user_id).all()
 
     if not chats:
-        raise HTTPException(status_code=404, detail="No chats found for this user")
+        return []
+
+    for i, chat in enumerate(chats):
+        vec_db = chat = db.query(VecDb).filter(VecDb.id == chat.vec_db_id).first()
+        chats[i].vec_name = vec_db.name
 
     return chats
-
-
-class MessagesRequest(BaseModel):
-    chat_id: int
-
-@app.get("/messages")
-def get_messages_by_user(request: MessagesRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Основной запрос для получения сообщений для текущего пользователя
-    query = db.query(Message).join(MessageChat).join(Chat).filter(Chat.user_id == current_user.id)
-    
-    # Если передан `chat_id`, фильтруем по конкретному чату
-    if request.chat_id:
-        query = query.filter(MessageChat.chat_id == request.chat_id)
-
-    # Получаем все сообщения
-    messages = query.order_by(Message.created_at.desc()).all()
-
-    # Если сообщений нет, возвращаем ошибку 404
-    if not messages:
-        raise HTTPException(status_code=404, detail="No messages found for the user")
-
-    return messages
 
 
 if __name__ == "__main__":

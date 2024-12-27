@@ -1,7 +1,6 @@
 import os
-from hugchat import hugchat
-from hugchat.login import Login
 from typing import Any, List
+from openai import OpenAI
 
 from sentence_transformers import SentenceTransformer
 
@@ -15,15 +14,12 @@ def load_bert():
     
     return bert
 
-def hugchat_client(login, password):
-    cookie_path_dir = "./cookies/" # NOTE: trailing slash (/) is required to avoid errors
-    sign = Login(login, password)
-    cookies = sign.login(cookie_dir_path=cookie_path_dir, save_cookies=True)
-
-    # Create your ChatBot
-    chatbot = hugchat.ChatBot(cookies=cookies.get_dict())  # or cookie_path="usercookies/<email>.json"
-    chatbot.switch_llm(1)
-    return chatbot
+def get_client(token):
+    client = OpenAI(
+        base_url="https://api-inference.huggingface.co/v1/",
+        api_key=token
+    )
+    return client
 
 
 def get_embeddings(texts, bert):
@@ -33,7 +29,7 @@ def get_embeddings(texts, bert):
         return []
 
 
-def llm_answer(messages, chatbot):
+def llm_answer(messages, client, model_name=os.getenv("MODEL_NAME")):
     try:
         history = ""
         if len(messages) >= num_context_messages:
@@ -44,8 +40,13 @@ def llm_answer(messages, chatbot):
             print(message['content'])
             print()
 
-        message_result = chatbot.chat(history) # note: message_result is a generator, the method will return immediately.
-        return message_result.wait_until_done()
+        completion = client.chat.completions.create(
+            model=model_name, 
+            messages=messages, 
+            temperature=0.7,
+            max_tokens=2048
+        )
+        return completion.choices[0].message.content
     
 
     except Exception as e:

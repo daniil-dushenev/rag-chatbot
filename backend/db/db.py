@@ -62,6 +62,7 @@ class Chat(Base):
     id = Column(Integer, primary_key=True, index=True)
     vec_db_id = Column(Integer, ForeignKey('vec_db.id'), nullable=False)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    name = Column(String(100))
 
     vec_db = relationship("VecDb", back_populates="chats")
     user = relationship("User", back_populates="chats")

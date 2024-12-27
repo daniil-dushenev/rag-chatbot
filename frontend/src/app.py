@@ -4,6 +4,7 @@ import requests
 import atexit
 from typing import List
 from chat_config import start_message, chunk_size, top_k
+import datetime
 import time
 
 
@@ -127,10 +128,9 @@ def create_new_chat(username, vec_name):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
-
     response = requests.post(
         f"{fastapi_host}/create_chat",
-        json={"username": username, 'vec_name': vec_name},
+        params={"username": username, 'vec_name': vec_name},
         headers=headers
     )
 
@@ -190,14 +190,19 @@ def chat_page(access_token):
             
 
         if "vector_store" not in st.session_state:
-            file_path = save_uploaded_files(document_files)
-            st.session_state.vector_store = get_vectorstore_from_files(file_path, chunk_size, access_token)
+            # file_path = save_uploaded_files(document_files)
+            name = st.session_state.username + datetime.datetime.now().strftime("%Y%m%d%H%M")
+            print(name)
+            get_vectorstore_from_files(name, document_files, chunk_size, access_token)
+            st.session_state.vector_store = name
 
-        chat_id = create_new_chat(st.session_state.username, st.session_state.vector_store.name)
+        if "chat_id" not in st.session_state:
+            chat_id = create_new_chat(st.session_state.username, st.session_state.vector_store)
+            st.session_state.chat_id = chat_id
 
         user_query = st.chat_input("Type your message ✍")
         if user_query is not None and user_query != "":
-            response = get_response(user_query, chat_id)
+            response = get_response(user_query, st.session_state.chat_id)
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             st.session_state.chat_history.append({"role": "assistant", "content": response})
 

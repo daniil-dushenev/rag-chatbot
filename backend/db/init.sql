@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS db_user (
 CREATE TABLE IF NOT EXISTS chats (
     id SERIAL PRIMARY KEY,
     vec_db_id INTEGER REFERENCES vec_db(id),
-    user_id INTEGER REFERENCES users(id)
+    user_id INTEGER REFERENCES users(id),
+    name VARCHAR(100)
 );
 
 -- Создаем таблицу message_chat, если она не существует
